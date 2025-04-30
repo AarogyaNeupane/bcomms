@@ -1,8 +1,9 @@
 import React from "react";
-import { Check, AlertTriangle, X, Repeat } from "lucide-react";
+import { Check, AlertTriangle, X, Repeat, BarChart } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 import type { FeedbackResponse } from "~/lib/services/groq-service";
+import { SentimentFeedback } from "~/components/ui/sentiment-feedback";
 
 interface FeedbackCardProps {
   transcription: string;
@@ -107,6 +108,27 @@ export function FeedbackCard({
                   <h4 className="mb-1 text-sm font-medium text-blue-700">Overall Assessment</h4>
                   <p className="text-blue-800">{feedback.overallFeedback}</p>
                 </div>
+                
+                {/* Sentiment Analysis Section */}
+                {feedback.sentiment ? (
+                  <div className="mb-4">
+                    <h4 className="mb-2 flex items-center gap-1 font-medium text-purple-600">
+                      <BarChart className="h-4 w-4" />
+                      <span>Sentiment Analysis</span>
+                    </h4>
+                    <SentimentFeedback sentiment={feedback.sentiment} />
+                  </div>
+                ) : (
+                  <div className="mb-4">
+                    <h4 className="mb-2 flex items-center gap-1 font-medium text-purple-600">
+                      <BarChart className="h-4 w-4" />
+                      <span>Sentiment Analysis</span>
+                    </h4>
+                    <div className="rounded-lg bg-gray-50 p-3 text-gray-500 text-sm">
+                      Sentiment analysis not available for this response.
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <div className="mt-6 text-center text-gray-500">
@@ -135,4 +157,4 @@ export function FeedbackCard({
       </div>
     </div>
   );
-} 
+}

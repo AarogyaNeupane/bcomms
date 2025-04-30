@@ -8,6 +8,7 @@ import { FeedbackCard } from "~/components/ui/feedback-card";
 import type { Scenario } from "~/components/ui/scenario-dropdown";
 import { AudioRecorder } from "~/lib/services/audio-recorder";
 import { RevAiService } from "~/lib/services/rev-ai-service";
+import { RevAiSentimentService, type SentimentSummary } from "~/lib/services/rev-ai-sentiment-service";
 import { GroqService, type FeedbackResponse } from "~/lib/services/groq-service";
 
 const scenarios: Scenario[] = [
@@ -61,12 +62,13 @@ export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [apiStatus, setApiStatus] = useState<{ revai: boolean; groq: boolean } | null>(null);
+  const [apiStatus, setApiStatus] = useState<{ revai: boolean; groq: boolean; sentiment: boolean } | null>(null);
 
   // References to our services
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
   const revAiServiceRef = useRef<RevAiService | null>(null);
   const groqServiceRef = useRef<GroqService | null>(null);
+  const sentimentServiceRef = useRef<RevAiSentimentService | null>(null);
 
   // Check API availability
   useEffect(() => {
@@ -96,9 +98,13 @@ export default function Home() {
         
         const groqAvailable = groqResponse.ok;
         
+        // Check sentiment analysis API (uses the same Rev.ai API key)
+        const sentimentAvailable = revaiAvailable;
+        
         setApiStatus({
           revai: revaiAvailable,
-          groq: groqAvailable
+          groq: groqAvailable,
+          sentiment: sentimentAvailable
         });
         
         if (!revaiAvailable || !groqAvailable) {
@@ -173,6 +179,16 @@ export default function Home() {
     // Initialize the Groq service if not already initialized
     if (!groqServiceRef.current) {
       groqServiceRef.current = new GroqService();
+    }
+    
+    // Initialize the sentiment analysis service if not already initialized
+    if (!sentimentServiceRef.current) {
+      sentimentServiceRef.current = new RevAiSentimentService({
+        onError: (error) => {
+          console.error('Sentiment analysis error:', error);
+          // Don't show error to user, as sentiment analysis is optional
+        }
+      });
     }
 
     // Cleanup only when component unmounts (empty dependency array)
@@ -463,12 +479,61 @@ export default function Home() {
         throw new Error("Feedback service not initialized");
       }
 
-      const feedbackResult = await groqServiceRef.current.analyzeSpeakingResponse(
+      // Start language feedback analysis
+      const languageFeedbackPromise = groqServiceRef.current.analyzeSpeakingResponse(
         selectedScenario,
         trimmedTranscription
       );
       
-      setFeedback(feedbackResult);
+      // Start sentiment analysis in parallel if available
+      let sentimentPromise: Promise<SentimentSummary | null> = Promise.resolve(null);
+      if (apiStatus?.sentiment && sentimentServiceRef.current) {
+        console.log('Starting sentiment analysis for transcription:', trimmedTranscription);
+        sentimentPromise = sentimentServiceRef.current.analyzeSentiment(trimmedTranscription)
+          .then(result => {
+            console.log('Sentiment analysis completed successfully:');
+            console.log('Overall sentiment:', result.overall);
+            console.log('Sentiment score:', result.score);
+            console.log('Sentiment details:', result.details);
+            return result;
+          })
+          .catch(error => {
+            console.error('Sentiment analysis failed:', error);
+            return null; // Return null on error so we can still show language feedback
+          });
+      } else {
+        console.log('Sentiment analysis skipped - API not available or service not initialized');
+      }
+      
+      // Wait for language feedback
+      const languageFeedback = await languageFeedbackPromise;
+      
+      // Set initial feedback without sentiment
+      setFeedback(languageFeedback);
+      setIsAnalyzing(false);
+      
+      // If sentiment analysis is available, update feedback when it completes
+      if (apiStatus?.sentiment && sentimentServiceRef.current) {
+        // Continue with sentiment analysis in the background
+        sentimentPromise.then(sentimentResult => {
+          if (sentimentResult) {
+            console.log('Updating UI with sentiment analysis results');
+            // Update feedback with sentiment data
+            setFeedback(prevFeedback => {
+              if (!prevFeedback) return prevFeedback;
+              return {
+                ...prevFeedback,
+                sentiment: sentimentResult
+              };
+            });
+          } else {
+            console.log('No sentiment results available to update UI');
+          }
+        }).catch(error => {
+          console.error('Error updating sentiment:', error);
+          // Don't show error to user as sentiment is optional
+        });
+      }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('Feedback error:', errorMsg);
@@ -513,7 +578,7 @@ export default function Home() {
           <ul className="mb-6 ml-6 list-disc space-y-2">
             {!apiStatus.revai && (
               <li className="text-red-600">
-                <span className="font-medium">Rev.ai API Key</span> - For speech-to-text transcription
+                <span className="font-medium">Rev.ai API Key</span> - For speech-to-text transcription and sentiment analysis
               </li>
             )}
             {!apiStatus.groq && (

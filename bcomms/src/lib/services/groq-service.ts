@@ -1,9 +1,11 @@
 import type { Scenario } from "~/components/ui/scenario-dropdown";
+import type { SentimentSummary } from "~/lib/services/rev-ai-sentiment-service";
 
 export interface FeedbackResponse {
   strengths: string[];
   improvements: string[];
   overallFeedback: string;
+  sentiment?: SentimentSummary;
 }
 
 /**
@@ -46,4 +48,4 @@ export class GroqService {
       throw new Error(`Failed to analyze speaking response: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-} 
+}
