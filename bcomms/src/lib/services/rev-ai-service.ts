@@ -1,4 +1,4 @@
-import { env } from "~/env";
+// import { env } from "~/env";
 
 // Define types for the Rev.ai API responses
 interface RevAiTranscriptElement {
@@ -148,7 +148,9 @@ export class RevAiService {
         // Connection established
         this.websocket.onopen = () => {
           console.log('WebSocket connection established with Rev.ai');
-          // No need to send a configuration message - all params are in the URL
+          // Set connected flag immediately when socket is opened
+          // This will be confirmed when we receive the 'connected' message with job ID
+          this.isConnected = true;
         };
         
         // Handle messages from the Rev.ai service
@@ -156,7 +158,21 @@ export class RevAiService {
           try {
             console.log(`WebSocket message received: ${typeof event.data === 'string' ? event.data.substring(0, 100) : 'binary data'}`);
             
-            const message = JSON.parse(event.data) as RevAiTranscriptMessage;
+            // Skip processing if we're no longer connected (e.g. disconnect was called)
+            if (!this.isConnected) {
+              console.log('Received message after disconnection, ignoring');
+              return;
+            }
+            
+            // Parse the incoming message
+            let message: RevAiTranscriptMessage;
+            try {
+              message = JSON.parse(event.data) as RevAiTranscriptMessage;
+            } catch (parseError) {
+              console.warn('Failed to parse WebSocket message as JSON:', parseError);
+              console.log('Raw message:', typeof event.data === 'string' ? event.data : 'binary data');
+              return; // Skip processing this message
+            }
             
             if (message.type === 'connected') {
               // Store the job ID if provided
@@ -167,7 +183,6 @@ export class RevAiService {
                 console.log('Rev.ai connection confirmed');
               }
               
-              this.isConnected = true;
               if (this.options.onConnected) {
                 this.options.onConnected();
               }
@@ -189,6 +204,8 @@ export class RevAiService {
           } catch (error) {
             console.error('Error processing Rev.ai message:', error);
             console.error('Message data:', typeof event.data === 'string' ? event.data : 'Binary data');
+            
+            // Don't fail fatally - try to keep the connection alive
             if (this.options.onError) {
               this.options.onError(new Error(`Error processing transcription: ${error instanceof Error ? error.message : String(error)}`));
             }
@@ -198,6 +215,7 @@ export class RevAiService {
         // Handle WebSocket errors
         this.websocket.onerror = (error) => {
           console.error('WebSocket error:', error);
+          this.isConnected = false; // Ensure connected flag is reset
           if (this.options.onError) {
             this.options.onError(new Error('WebSocket connection error'));
           }
@@ -234,8 +252,8 @@ export class RevAiService {
       return;
     }
 
-    // Log the audio format for debugging
-    console.log(`Sending audio chunk: type=${audioChunk.type}, size=${audioChunk.size} bytes`);
+    // Log the audio format for debugging - ensure type is a string
+    console.log(`Sending audio chunk: type=${String(audioChunk.type)}, size=${audioChunk.size} bytes`);
     
     // Rev.ai expects binary audio data
     audioChunk.arrayBuffer().then(buffer => {
@@ -288,6 +306,17 @@ export class RevAiService {
           console.log(`Updated with final transcript: "${this.currentText}"`);
         }
       }
+      
+      // After processing a final transcript, ensure we trigger the onTranscriptionComplete callback
+      if (this.options.onTranscriptionComplete) {
+        console.log('Triggering onTranscriptionComplete with final transcript');
+        const averageConfidence = confidenceCount > 0 ? confidenceSum / confidenceCount : undefined;
+        this.options.onTranscriptionComplete({
+          text: this.currentText,
+          isFinal: true,
+          confidence: averageConfidence
+        });
+      }
     } else if (message.type === 'partial' && transcriptText.trim().length > 0) {
       // Smart handling of partial transcripts
       const cleanText = transcriptText.trim();
@@ -337,10 +366,61 @@ export class RevAiService {
   /**
    * Signal end of audio stream to Rev.ai
    */
-  finishTranscription(): void {
-    if (this.websocket && this.isConnected) {
-      // Send EOS (End of Stream) message as required by Rev.ai documentation
-      this.websocket.send('EOS');
+  private async sendEndOfStream(): Promise<void> {
+    // If we're not connected or websocket is null, return a resolved promise without warning
+    if (!this.isConnected || !this.websocket) {
+      console.log('Cannot send end of stream - not connected or websocket is null');
+      return Promise.resolve();
+    }
+
+    // Check WebSocket state - safely access readyState with null check
+    if (this.websocket.readyState !== WebSocket.OPEN) {
+      console.log(`WebSocket is not open (state: ${this.websocket.readyState}), cannot send end of stream`);
+      return Promise.resolve();
+    }
+    
+    try {
+      if (this.jobId) {
+        // Make sure jobId is properly converted to string
+        const jobIdString = String(this.jobId);
+        console.log(`Sending end of stream for job ID: ${jobIdString}`);
+        
+        // Let Rev.ai know we're done sending audio
+        const response = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            action: 'endStream',
+            jobId: jobIdString,
+          }),
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Failed to end stream: ${response.statusText} - ${errorText}`);
+        }
+        
+        console.log('Successfully sent end of stream signal');
+        
+        // Also send EOS directly to the websocket as a fallback - with null check
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+          try {
+            this.websocket.send('EOS');
+            console.log('Sent EOS directly to WebSocket');
+          } catch (wsError) {
+            console.warn('Error sending EOS directly to WebSocket:', wsError);
+          }
+        }
+      } else {
+        console.log('Cannot end stream - no job ID available');
+      }
+    } catch (error) {
+      console.error('Error ending stream:', error);
+      // Don't throw an error here, just log it and continue
+      // This prevents the error from breaking the user experience
+      return Promise.resolve();
     }
   }
 
@@ -348,11 +428,41 @@ export class RevAiService {
    * Close the WebSocket connection
    */
   disconnect(): void {
-    if (this.websocket) {
-      this.websocket.close();
-      this.websocket = null;
+    try {
+      console.log('Disconnecting from Rev.ai...');
+      
+      // Only attempt to send end of stream if we're actually connected
+      if (this.isConnected && this.websocket) {
+        // Note: We're intentionally not awaiting this call to avoid blocking during cleanup
+        // sendEndOfStream now handles its own errors internally
+        this.sendEndOfStream().catch(error => {
+          console.warn('Non-critical error while ending stream during disconnect:', error);
+        });
+      }
+      
+      if (this.websocket) {
+        // Check if the connection is actually open before closing
+        if (this.websocket.readyState === WebSocket.OPEN) {
+          this.websocket.close(1000, "Disconnected by client");
+          console.log('WebSocket cleanly closed');
+        } else if (this.websocket.readyState === WebSocket.CONNECTING) {
+          // If it's still connecting, force close it
+          this.websocket.close(1000, "Connection aborted by client");
+          console.log('Aborted connecting WebSocket');
+        }
+        // For already closing or closed states, no action needed
+        this.websocket = null;
+      }
+      
       this.isConnected = false;
+      this.currentText = '';
       this.jobId = undefined;
+      console.log('Disconnected from Rev.ai');
+    } catch (error) {
+      console.error('Error disconnecting from Rev.ai:', error);
+      // Ensure isConnected is reset even if there's an error
+      this.isConnected = false;
+      this.websocket = null;
     }
   }
 
@@ -362,4 +472,67 @@ export class RevAiService {
   isReady(): boolean {
     return this.isConnected;
   }
-} 
+
+  /**
+   * Public method to finalize the transcription
+   * This maintains backward compatibility with code that uses the previous API
+   */
+  finishTranscription(): void {
+    // Check if we're actually connected before trying to end the stream
+    if (!this.isConnected || !this.websocket) {
+      console.log('Skipping finalization - not connected');
+      
+      // Even when not connected, if we have some text, report it as final
+      if (this.options.onTranscriptionComplete && this.currentText) {
+        console.log('Reporting current text as final even though not connected:', this.currentText);
+        this.options.onTranscriptionComplete({
+          text: this.currentText,
+          isFinal: true
+        });
+      }
+      
+      return;
+    }
+
+    console.log('Finalizing transcription...');
+    
+    // Try to end the stream gracefully - only if we're actually connected
+    if (this.isConnected && this.websocket) {
+      this.sendEndOfStream().catch(error => {
+        console.warn('Non-critical error in finishTranscription:', error);
+        
+        // Even if sendEndOfStream fails, we still want to report the current 
+        // transcription as a final result
+        if (this.options.onTranscriptionComplete && this.currentText) {
+          console.log('Reporting current text as final after error:', this.currentText);
+          this.options.onTranscriptionComplete({
+            text: this.currentText,
+            isFinal: true
+          });
+        }
+      });
+    }
+      
+    // Wait a moment to allow any pending final messages to be processed
+    setTimeout(() => {
+      // Report current text as final if we haven't already received a final message
+      if (this.options.onTranscriptionComplete && this.currentText) {
+        console.log('Reporting current text as final after timeout:', this.currentText);
+        this.options.onTranscriptionComplete({
+          text: this.currentText,
+          isFinal: true
+        });
+      }
+      
+      // Also try to close the WebSocket gracefully
+      try {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+          this.websocket.close(1000, "Client finished");
+          console.log('WebSocket closed by client');
+        }
+      } catch (error) {
+        console.warn('Error closing WebSocket:', error);
+      }
+    }, 1000); // Wait 1 second before forcing completion
+  }
+}

@@ -2,23 +2,25 @@
 // The original issue is in the PopperAnchor component where useEffect is missing a dependency array
 
 import * as React from "react"
-import { createContextScope } from "@radix-ui/react-context"
 import { Primitive } from "@radix-ui/react-primitive"
 import { useComposedRefs } from "@radix-ui/react-compose-refs"
+import { usePopperContext } from "./popper-context"
 
 type ScopedProps<P> = P & { __scopePopper?: string }
-const [createPopperContext, createPopperScope] = createContextScope('Popper')
+// Remove unused variables
+// const [createPopperContext, createPopperScope] = createContextScope('Popper')
 
 type PopperAnchorElement = React.ElementRef<typeof Primitive.div>
 interface PopperAnchorProps extends React.ComponentPropsWithoutRef<typeof Primitive.div> {
-  virtualRef?: React.RefObject<any>
+  virtualRef?: React.RefObject<HTMLElement>; // Properly typed instead of any
 }
 
 // The important fix is in this component
 export const PopperAnchor = React.forwardRef<PopperAnchorElement, PopperAnchorProps>(
   (props: ScopedProps<PopperAnchorProps>, forwardedRef) => {
-    const { __scopePopper, virtualRef, ...anchorProps } = props
-    const context = usePopperContext('Anchor', __scopePopper)
+    // Destructure props but omit unused __scopePopper
+    const { virtualRef, ...anchorProps } = props
+    const context = usePopperContext('Anchor')
     const ref = React.useRef<PopperAnchorElement>(null)
     const composedRefs = useComposedRefs(forwardedRef, ref)
 
@@ -27,14 +29,14 @@ export const PopperAnchor = React.forwardRef<PopperAnchorElement, PopperAnchorPr
       // Consumer can anchor the popper to something that isn't
       // a DOM node e.g. pointer position, so we override the
       // `anchorRef` with their virtual ref in this case.
-      context.onAnchorChange?.(virtualRef?.current || ref.current)
-    }, [context.onAnchorChange, virtualRef, ref]); // Added proper dependencies
+      context.onAnchorChange?.(virtualRef?.current ?? ref.current) // Use nullish coalescing
+    }, [context, virtualRef, ref]); // Added context to dependency array
 
     return virtualRef ? null : <Primitive.div {...anchorProps} ref={composedRefs} />
   }
 )
 
-// Mock implementation of the usePopperContext for TypeScript to be happy
-function usePopperContext(component: string, scope?: string) {
-  return { onAnchorChange: (node: any) => {} }
-} 
+// Add display name
+PopperAnchor.displayName = 'PopperAnchor';
+
+// Remove the mock implementation since we're now importing the real one from popper-context.ts 

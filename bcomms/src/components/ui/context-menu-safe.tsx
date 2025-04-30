@@ -8,7 +8,6 @@
 
 import * as React from "react"
 import * as ContextMenuPrimitive from "@radix-ui/react-context-menu"
-import { CheckIcon, ChevronRightIcon, CircleIcon } from "lucide-react"
 
 import { cn } from "~/lib/utils"
 
@@ -44,7 +43,7 @@ function StablePortal({
 
 // Export the safe context menu components
 export const SafeContextMenu = {
-  Root: React.forwardRef((props: React.ComponentProps<typeof ContextMenuPrimitive.Root>, ref: React.Ref<HTMLDivElement>) => (
+  Root: React.forwardRef<HTMLDivElement, React.ComponentProps<typeof ContextMenuPrimitive.Root>>((props, _ref) => (
     <ContextMenuPrimitive.Root 
       // Always set modal to false to avoid focus-related issues
       // that can cause infinite loops with FocusScope
@@ -56,11 +55,11 @@ export const SafeContextMenu = {
   // Use our stable portal implementation
   Portal: StablePortal,
   // Pre-compose the content with the portal
-  Content: React.forwardRef(
-    ({ className, ...props }: React.ComponentProps<typeof ContextMenuPrimitive.Content>, ref: React.Ref<HTMLDivElement>) => (
+  Content: React.forwardRef<HTMLDivElement, React.ComponentProps<typeof ContextMenuPrimitive.Content>>(
+    ({ className, ...props }, _ref) => (
       <StablePortal>
         <ContextMenuPrimitive.Content
-          ref={ref}
+          ref={_ref}
           className={cn(
             "bg-popover text-popover-foreground animate-in fade-in-0 zoom-in-95 z-50 min-w-[8rem] overflow-hidden rounded-md border p-1 shadow-md",
             className
@@ -82,4 +81,8 @@ export const SafeContextMenu = {
   Sub: ContextMenuPrimitive.Sub,
   SubTrigger: ContextMenuPrimitive.SubTrigger,
   SubContent: ContextMenuPrimitive.SubContent,
-} 
+}
+
+// Add display names
+SafeContextMenu.Root.displayName = "SafeContextMenuRoot"
+SafeContextMenu.Content.displayName = "SafeContextMenuContent" 

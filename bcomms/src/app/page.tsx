@@ -7,7 +7,7 @@ import { ScenarioDropdown } from "~/components/ui/scenario-dropdown";
 import { FeedbackCard } from "~/components/ui/feedback-card"; 
 import type { Scenario } from "~/components/ui/scenario-dropdown";
 import { AudioRecorder } from "~/lib/services/audio-recorder";
-import { RevAiService, type TranscriptionResult } from "~/lib/services/rev-ai-service";
+import { RevAiService } from "~/lib/services/rev-ai-service";
 import { GroqService, type FeedbackResponse } from "~/lib/services/groq-service";
 
 const scenarios: Scenario[] = [
@@ -70,6 +70,9 @@ export default function Home() {
 
   // Check API availability
   useEffect(() => {
+    // Use void operator to explicitly mark the promise as intentionally not awaited
+    void checkApiAvailability();
+    
     async function checkApiAvailability() {
       try {
         // Check Rev.ai API
@@ -109,18 +112,47 @@ export default function Home() {
         console.error('Error checking API availability:', error);
       }
     }
-    
-    checkApiAvailability();
   }, []);
 
-  // Initialize services
+  // Handle automatic transition from stopping to recorded when transcription is available
   useEffect(() => {
-    // Initialize services only once
+    // Only process if we're in the stopping state
+    if (recordingState === 'stopping') {
+      // If we have transcription text, set a short timeout to transition to recorded state
+      if (transcription.trim()) {
+        console.log('Transcription detected while in stopping state:', transcription);
+        
+        // Use a small timeout to allow other state updates to complete
+        const timer = setTimeout(() => {
+          console.log('Auto-transitioning from stopping to recorded state due to transcription');
+          setRecordingState('recorded');
+        }, 500);
+        
+        // Clean up the timer if the component unmounts or state changes
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [recordingState, transcription]);
+
+  // Initialize services - only once when component mounts
+  useEffect(() => {
+    console.log('Initializing services (component mount)');
+    
+    // Initialize Rev.ai service if not already initialized
     if (!revAiServiceRef.current) {
-      // Initialize the Rev.ai service
       revAiServiceRef.current = new RevAiService({
         onTranscriptionUpdate: (result) => {
           setTranscription(result.text);
+        },
+        onTranscriptionComplete: (finalResult) => {
+          console.log('Final transcription received:', finalResult.text);
+          setTranscription(finalResult.text);
+          
+          // Ensure we transition to the recorded state once we have the final transcription
+          if (recordingState === 'stopping') {
+            console.log('Transitioning from stopping to recorded state after receiving final transcription');
+            setRecordingState('recorded');
+          }
         },
         onConnected: () => {
           console.log('Successfully connected to Rev.ai');
@@ -128,26 +160,34 @@ export default function Home() {
         onError: (error) => {
           console.error('Rev.ai error:', error);
           setError(`Transcription error: ${error.message}`);
-          setRecordingState('idle');
+          
+          // Also ensure we exit the stopping state if there's an error
+          if (recordingState === 'stopping') {
+            console.log('Error occurred while stopping, forcing state to idle');
+            setRecordingState('idle');
+          }
         }
       });
     }
 
-    // Initialize the Groq service
+    // Initialize the Groq service if not already initialized
     if (!groqServiceRef.current) {
       groqServiceRef.current = new GroqService();
     }
 
-    // Cleanup on unmount
+    // Cleanup only when component unmounts (empty dependency array)
     return () => {
+      console.log('Component unmounting, cleaning up services');
       if (audioRecorderRef.current) {
         audioRecorderRef.current.dispose();
+        audioRecorderRef.current = null;
       }
       if (revAiServiceRef.current) {
         revAiServiceRef.current.disconnect();
+        // Don't set to null as we might reuse the service
       }
     };
-  }, []);
+  }, []); // Empty dependency array - only run on mount/unmount
 
   const handleStartRecording = async () => {
     if (!selectedScenario) {
@@ -161,6 +201,8 @@ export default function Home() {
       return;
     }
 
+    // Set state first to avoid race conditions
+    setRecordingState('recording');
     setError(null);
     setFeedback(undefined);
     setTranscription('');
@@ -168,18 +210,24 @@ export default function Home() {
     try {
       console.log("Starting recording and transcription process");
       
-      // If there's an existing connection, disconnect it to ensure a clean slate
-      if (revAiServiceRef.current) {
+      // Only disconnect if the service is actually ready/connected
+      if (revAiServiceRef.current?.isReady()) {
+        console.log("Disconnecting existing Rev.ai connection");
         revAiServiceRef.current.disconnect();
       }
       
-      // Initialize the audio recorder first
+      // Initialize the audio recorder first - create a new instance each time
+      if (audioRecorderRef.current) {
+        // Properly dispose of any existing recorder
+        audioRecorderRef.current.dispose();
+      }
+      
       audioRecorderRef.current = new AudioRecorder({
         // Rev.ai requires specific audio format (16kHz, mono)
         onDataAvailable: (data) => {
           console.log(`Audio chunk received: ${data.size} bytes, type: ${data.type}`);
           // Only send data if we're connected to Rev.ai
-          if (revAiServiceRef.current && revAiServiceRef.current.isReady()) {
+          if (revAiServiceRef.current?.isReady()) {
             try {
               revAiServiceRef.current.sendAudioChunk(data);
             } catch (error) {
@@ -192,7 +240,7 @@ export default function Home() {
         onStop: () => {
           console.log("Recording stopped, finalizing transcription");
           // Signal end of audio stream when recording stops
-          if (revAiServiceRef.current && revAiServiceRef.current.isReady()) {
+          if (revAiServiceRef.current?.isReady()) {
             revAiServiceRef.current.finishTranscription();
           } else {
             console.warn("Rev.ai not ready when recording stopped");
@@ -210,10 +258,17 @@ export default function Home() {
       await revAiServiceRef.current.connect();
       console.log("Rev.ai connection established");
 
+      // Add a small delay to ensure the connection is fully established
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Verify that Rev.ai service is ready before proceeding
+      if (!revAiServiceRef.current.isReady()) {
+        throw new Error("Rev.ai connection established but not ready. Please try again.");
+      }
+
       // Start recording after Rev.ai is connected
       console.log("Starting audio recording");
       await audioRecorderRef.current.startRecording();
-      setRecordingState('recording');
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('Recording error:', errorMsg);
@@ -230,23 +285,152 @@ export default function Home() {
   };
 
   const handleStopRecording = () => {
-    if (audioRecorderRef.current) {
+    try {
+      console.log('Stopping recording...');
+      setRecordingState('stopping');
+      
+      // First, ensure we have a reference to both services before proceeding
+      if (!audioRecorderRef.current) {
+        console.error('Audio recorder not initialized');
+        setError('Failed to stop recording: recorder not initialized');
+        setRecordingState('idle');
+        return;
+      }
+      
+      // Create a flag to track if we've already finalized the transcription
+      let transcriptionFinalized = false;
+      
+      // Set up a handler for when audio recording stops
+      const originalOnStop = audioRecorderRef.current.options.onStop;
+      audioRecorderRef.current.onStop = (blob) => {
+        console.log(`Audio recording stopped, blob size: ${blob.size} bytes`);
+        
+        // Call the original onStop handler if it exists
+        if (originalOnStop) {
+          originalOnStop(blob);
+        }
+        
+        // Check if we received a valid audio blob
+        if (blob.size <= 4) {
+          console.warn('Received minimal or empty audio blob, likely a dummy chunk');
+          
+          // If this is a dummy chunk (from our fallback mechanism), show a helpful error
+          setError('No audio was detected. Please check your microphone and try again.');
+          
+          // Force state to idle after a short delay to allow UI to update
+          setTimeout(() => {
+            setRecordingState('idle');
+            
+            // Clean up resources
+            if (revAiServiceRef.current) {
+              revAiServiceRef.current.disconnect();
+            }
+          }, 300);
+          
+          return;
+        }
+        
+        // Only finalize if we haven't already and Rev.ai is ready
+        if (!transcriptionFinalized && revAiServiceRef.current?.isReady()) {
+          console.log('Finalizing transcription after recording stopped');
+          transcriptionFinalized = true;
+          revAiServiceRef.current.finishTranscription();
+        }
+      };
+      
+      // Stop the recording
       audioRecorderRef.current.stopRecording();
-      setRecordingState('recorded');
+      
+      // Also set up a backup finalization with a delay to ensure Rev.ai gets the signal
+      if (revAiServiceRef.current?.isReady()) {
+        setTimeout(() => {
+          if (!transcriptionFinalized && revAiServiceRef.current?.isReady()) {
+            console.log('Backup finalization of transcription after delay');
+            transcriptionFinalized = true;
+            revAiServiceRef.current.finishTranscription();
+          }
+        }, 800); // Increased from 500ms to 800ms for more reliability
+      }
+      
+      // Set a shorter initial timeout to check for progress
+      setTimeout(() => {
+        if (recordingState === 'stopping' && !transcription.trim()) {
+          console.log('No transcription after 2 seconds, showing progress message');
+          setError('Processing audio... If nothing happens in a few seconds, please try again.');
+        }
+      }, 2000);
+      
+      // Set a medium timeout to check for progress
+      setTimeout(() => {
+        if (recordingState === 'stopping') {
+          if (transcription.trim()) {
+            console.log('Transcription received, transitioning to recorded state');
+            setRecordingState('recorded');
+            setError(null);
+          }
+        }
+      }, 3000);
+      
+      // Set a longer timeout to ensure we move to 'recorded' state even if there's an issue
+      // This prevents the UI from getting stuck in 'stopping' state
+      setTimeout(() => {
+        if (recordingState === 'stopping') {
+          console.log('Force timeout: Transitioning from stopping state after timeout');
+          
+          // If we have transcription text, use recorded state
+          if (transcription.trim()) {
+            setRecordingState('recorded');
+            setError(null);
+          } else {
+            // If no transcription, show error and reset
+            setError('No transcription received. Please check your microphone and try again.');
+            setRecordingState('idle');
+            
+            // Ensure we disconnect from Rev.ai to clean up resources
+            if (revAiServiceRef.current) {
+              console.log('Disconnecting Rev.ai service after timeout with no transcription');
+              revAiServiceRef.current.disconnect();
+            }
+          }
+        }
+      }, 4000); // Reduced from 5000ms to 4000ms since we have earlier checks
+    } catch (error) {
+      console.error('Error stopping recording:', error);
+      setError(`Failed to stop recording: ${error instanceof Error ? error.message : String(error)}`);
+      setRecordingState('idle');
     }
   };
 
   const handleTryAgain = () => {
-    setShowFeedback(false);
-    setTranscription('');
-    setFeedback(undefined);
-    setRecordingState('idle');
-    setError(null);
+    console.log('User requested to try again, resetting state');
     
-    // Disconnect from Rev.ai
-    if (revAiServiceRef.current) {
-      revAiServiceRef.current.disconnect();
-    }
+    // First set recording state to idle to prevent any race conditions
+    // This ensures no cleanup functions are triggered by state changes
+    setRecordingState('idle');
+    
+    // Small delay to ensure state update is processed before continuing
+    setTimeout(() => {
+      // Clear UI state
+      setShowFeedback(false);
+      setTranscription('');
+      setFeedback(undefined);
+      setError(null);
+      
+      // Disconnect from Rev.ai to ensure clean state
+      if (revAiServiceRef.current) {
+        console.log('Disconnecting Rev.ai service for retry');
+        revAiServiceRef.current.disconnect();
+      }
+      
+      // Dispose of audio recorder to ensure clean state
+      if (audioRecorderRef.current) {
+        console.log('Disposing audio recorder for retry');
+        audioRecorderRef.current.dispose();
+        audioRecorderRef.current = null;
+      }
+      
+      console.log('Reset complete, ready for new recording');
+    }, 100);
   };
 
   const handleSubmitRecording = async () => {
@@ -255,8 +439,12 @@ export default function Home() {
       return;
     }
 
-    if (!transcription.trim()) {
-      setError("No speech detected. Please try again.");
+    const trimmedTranscription = transcription.trim();
+    
+    if (!trimmedTranscription) {
+      // If there's no transcription, provide a helpful error message
+      setError("No speech detected or transcription failed. Please try recording again.");
+      setRecordingState('idle');
       return;
     }
 
@@ -266,6 +454,7 @@ export default function Home() {
       return;
     }
 
+    setError(null); // Clear any previous errors
     setIsAnalyzing(true);
     setShowFeedback(true);
     
@@ -276,7 +465,7 @@ export default function Home() {
 
       const feedbackResult = await groqServiceRef.current.analyzeSpeakingResponse(
         selectedScenario,
-        transcription
+        trimmedTranscription
       );
       
       setFeedback(feedbackResult);
@@ -290,6 +479,13 @@ export default function Home() {
       } else {
         setError(`Failed to analyze response: ${errorMsg}`);
       }
+      
+      // Keep the feedback panel open even when there's an error, so user can see the error
+      setFeedback({
+        strengths: [],
+        improvements: ["Unable to analyze your response due to a technical issue."],
+        overallFeedback: "Please try again later or contact support if the problem persists."
+      });
     } finally {
       setIsAnalyzing(false);
     }

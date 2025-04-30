@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { env } from '~/env';
 
 // This middleware runs during app initialization
-export function middleware(request: NextRequest) {
+export function middleware(_request: NextRequest) {
   // Log environment variables status during initialization
   console.log('Environment variables status:');
   console.log('- REVAI_API_KEY:', env.REVAI_API_KEY ? 'Set' : 'Not set');

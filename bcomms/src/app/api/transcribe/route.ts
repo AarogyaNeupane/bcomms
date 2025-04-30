@@ -4,9 +4,18 @@ import { env } from '~/env';
 // Rev.ai API endpoint for WebSocket streaming
 const REV_AI_STREAMING_URL = 'wss://api.rev.ai/speechtotext/v1/stream';
 
+// Define interface for the request payload
+interface TranscribeRequest {
+  action: string;
+  jobId?: string;
+  // We'll include audio property but mark it as optional since we don't use it for 'setup' action
+  audio?: Blob;
+}
+
 export async function POST(request: Request) {
   try {
-    const { action, audio } = await request.json();
+    const requestData = await request.json() as TranscribeRequest;
+    const { action, jobId } = requestData;
     
     // Check if Rev.ai API key is available
     if (!env.REVAI_API_KEY) {
@@ -26,7 +35,25 @@ export async function POST(request: Request) {
         apiKey: env.REVAI_API_KEY,
         streamingUrl: REV_AI_STREAMING_URL
       });
-    } 
+    } else if (action === 'endStream') {
+      // Handle endStream action
+      if (!jobId) {
+        console.error('No job ID provided for endStream action');
+        return NextResponse.json(
+          { error: 'Job ID is required to end the stream' },
+          { status: 400 }
+        );
+      }
+      
+      console.log(`Processing endStream for job ID: ${jobId}`);
+      
+      // For now, just acknowledge the end of stream
+      // No actual API call needed as WebSocket handles this
+      return NextResponse.json({ 
+        success: true,
+        message: `Stream ended for job ID: ${jobId}`
+      });
+    }
     
     // For future use if we need to handle other Rev.ai API actions
     return NextResponse.json(

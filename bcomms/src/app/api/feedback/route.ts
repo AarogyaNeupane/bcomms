@@ -6,6 +6,21 @@ import type { FeedbackResponse } from '~/lib/services/groq-service';
 // Groq API endpoints
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
+// Define interface for the request body
+interface FeedbackRequest {
+  scenario: Scenario;
+  transcription: string;
+}
+
+// Define interface for the Groq API response
+interface GroqApiResponse {
+  choices: {
+    message: {
+      content: string;
+    };
+  }[];
+}
+
 // Generate a prompt for the Groq LLM based on the scenario and user's response
 function generatePrompt(scenario: Scenario, transcription: string): string {
   return `
@@ -19,7 +34,7 @@ The user's spoken response (transcribed): "${transcription}"
 Please provide specific, constructive feedback on the user's response. Include:
 
 1. What aspects of the response were effective and why.
-2. What could be improved and how specifically they should improve it.
+2. What could be improved and how specifically they should improve it. Focus on tone, intonation, and pronunciation.
 3. A brief overall assessment of the response's effectiveness in the given scenario.
 
 Format your response as JSON with the following structure:
@@ -35,7 +50,7 @@ Make sure each point is specific, actionable, and relevant to the scenario. Keep
 
 export async function POST(request: Request) {
   try {
-    const { scenario, transcription } = await request.json();
+    const { scenario, transcription } = await request.json() as FeedbackRequest;
     
     // Check if Groq API key is available
     if (!env.GROQ_API_KEY) {
@@ -71,7 +86,12 @@ export async function POST(request: Request) {
       throw new Error(`Groq API error (${response.status}): ${errorText}`);
     }
     
-    const data = await response.json();
+    const data = await response.json() as GroqApiResponse;
+    
+    // Check if response has valid format using optional chaining
+    if (!data.choices?.[0]?.message?.content) {
+      throw new Error('Invalid response format from Groq API');
+    }
     
     // Parse the response content as JSON
     const feedbackContent = JSON.parse(data.choices[0].message.content) as FeedbackResponse;

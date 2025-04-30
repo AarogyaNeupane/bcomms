@@ -2,7 +2,7 @@ import { Mic, Square, CheckCircle, RefreshCw } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "./button";
 
-export type RecordingState = 'idle' | 'recording' | 'recorded';
+export type RecordingState = 'idle' | 'recording' | 'stopping' | 'recorded';
 
 interface MicrophoneButtonProps {
   onRecord: () => void;
@@ -23,12 +23,13 @@ export function MicrophoneButton({
 }: MicrophoneButtonProps) {
   const isRecording = recordingState === 'recording';
   const isRecorded = recordingState === 'recorded';
+  const isStopping = recordingState === 'stopping';
   
   // Handle the main microphone button click
   const handleMainButtonClick = () => {
     if (isRecording) {
       onStop();
-    } else if (!isRecorded) {
+    } else if (!isRecorded && !isStopping) {
       onRecord();
     }
   };
@@ -42,16 +43,21 @@ export function MicrophoneButton({
           "h-16 w-16 rounded-full border-2 transition-all duration-300",
           isRecording 
             ? "border-red-500 bg-red-100 text-red-600 animate-pulse" 
-            : isRecorded
-              ? "border-green-500 bg-green-100 text-green-600"
-              : "border-blue-500 bg-blue-100 text-blue-600 hover:bg-blue-200",
+            : isStopping
+              ? "border-orange-500 bg-orange-100 text-orange-600"
+              : isRecorded
+                ? "border-green-500 bg-green-100 text-green-600"
+                : "border-blue-500 bg-blue-100 text-blue-600 hover:bg-blue-200",
           className
         )}
         onClick={handleMainButtonClick}
-        aria-label={isRecording ? "Stop recording" : "Start recording"}
+        disabled={isStopping}
+        aria-label={isRecording ? "Stop recording" : isStopping ? "Processing..." : "Start recording"}
       >
         {isRecording ? (
           <Square className="h-8 w-8 animate-pulse" />
+        ) : isStopping ? (
+          <RefreshCw className="h-8 w-8 animate-spin" />
         ) : isRecorded ? (
           <CheckCircle className="h-8 w-8" />
         ) : (
@@ -84,6 +90,8 @@ export function MicrophoneButton({
       <div className="text-center text-xs text-gray-400">
         {isRecording ? (
           "Recording... Tap to stop"
+        ) : isStopping ? (
+          "Processing recording..."
         ) : isRecorded ? (
           "Recording complete!"
         ) : (
